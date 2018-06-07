@@ -13,7 +13,7 @@ data(sleepstudy)
 # ?sleepstudy
 
 # Create a model for later comparison
-mod_lme = lmer(Reaction~Days+(Days|Subject), sleepstudy)
+mod_lme = lmer(Reaction ~ Days + (1 | Subject) + (0 + Days | Subject), sleepstudy)
 
 dat = list(N=nrow(sleepstudy), I=length(unique(sleepstudy$Subject)), 
            Subject=as.numeric(sleepstudy$Subject), Days = sleepstudy$Days, 
@@ -28,6 +28,14 @@ data {                                    // data setup
   vector<lower=0>[N] RT;                  // Response: reaction time
   vector<lower=0>[N] Days;                // Days in study
   int<lower=1,upper=I> Subject[N];        // Subject
+}
+
+transformed data {
+  real startInt;                          // Create starting point for Intercept (mean day 0)
+
+  startInt = 0;
+  for (n in 1:N) 
+    if (Days[n] == 0) startInt = startInt + RT[n]/I;
 }
 
 parameters {
@@ -45,20 +53,20 @@ transformed parameters {
   vector[N] yhat; 
 
   for (n in 1:N)                         // Linear predictor
-    yhat[n] <- gammaIntercept[Subject[n]] + gammaDays[Subject[n]] * Days[n];
+    yhat[n] = gammaIntercept[Subject[n]] + gammaDays[Subject[n]] * Days[n];
 } 
 
 model {
   // priors
-  Intercept ~ normal(0, 100);            // example of weakly informative priors (and ignoring Matt trick for now);
+  Intercept ~ normal(startInt, 100);     // example of weakly informative priors;
   beta ~ normal(0, 100);                 // remove to essentially duplicate lme4 via improper prior
 
   gammaIntercept ~ normal(Intercept, sd_int);
   gammaDays ~ normal(beta, sd_beta);
   
-  sd_int ~ cauchy(0, 2.5);
-  sd_beta ~ cauchy(0, 2.5);
-  sigma_y ~ cauchy(0, 2.5);
+  sd_int ~ cauchy(0, 5);
+  sd_beta ~ cauchy(0, 5);
+  sigma_y ~ cauchy(0, 5);
 
   // likelihood
   RT ~ normal(yhat, sigma_y);
@@ -70,7 +78,7 @@ model {
 
 library(rstan)
 fit = stan(model_code = stanmodelcode, model_name = "example",
-            data = dat, iter = 22000, warmup=2000, thin=20, chains = 4,
+            data = dat, iter = 7000, warmup=2000, thin=20, chains = 4,
             verbose = F) 
 
 ### Summarize
@@ -83,35 +91,19 @@ mod_lme
 print(fit, digits_summary=3, pars=c('gammaIntercept', 'gammaDays'))
 
 ### Diagnostic plots
-traceplot(fit, pars=c('Intercept','beta','sigma_y', 'sd_int', 'sd_beta'))
-traceplot(fit, pars=c('Intercept','beta','sigma_y', 'sd_int', 'sd_beta'), inc_warmup=F)
+shinystan::launch_shinystan(fit)
 
 ###############################
 ### A parallelized approach ###
 ###############################
-library(parallel)
-cl = makeCluster(3)
-clusterEvalQ(cl, library(rstan))
 
-clusterExport(cl, c('stanmodelcode', 'dat', 'fit')) 
+fit2 = stan(model_code = stanmodelcode, model_name = "mixedreg", #init=0,
+            fit = fit, # if using the same model code, this will use the previous compilation
+            data = dat, iter = 7000, warmup=2000, thin=20, cores=4,
+            verbose = T)
 
-p = proc.time()
-parfit = parSapply(cl, 1:3, function(i) stan(model_code = stanmodelcode, model_name = "mixedreg", #init=0,
-                                                   fit = fit, # if using the same model code, this will use the previous compilation
-                                                   data = dat, iter = 120000, warmup=20000, thin=10, chains = 1, chain_id=i,
-                                                   verbose = T), 
-                    simplify=F) 
-
-proc.time() - p
-
-stopCluster(cl)
-
-# combine the chains
-fit2 = sflist2stanfit(parfit)
 
 # examine some diagnostics
-ainfo = get_adaptation_info(fit2)
-cat(ainfo[[1]])
 samplerpar = get_sampler_params(fit2)[[1]]
 summary(samplerpar)
 
@@ -123,5 +115,4 @@ print(fit2, pars= c('Intercept','beta','sigma_y', 'sd_int', 'sd_beta','lp__'), d
 mod_lme
 
 # diagnostics
-traceplot(fit2, inc_warmup=F, pars=c('Intercept','beta','sigma_y', 'sd_int', 'sd_beta', 'lp__'))
-pairs(fit2, pars=c('Intercept','beta'))
+shinystan::launch_shinystan(fit2)
